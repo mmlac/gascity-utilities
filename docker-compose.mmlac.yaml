@@ -1,5 +1,5 @@
 # Run with
-# GIT_USER="<your name>" GIT_EMAIL="<your email>" docker compose -f docker-compose.mmlac.yaml up -d
+# GIT_USER="<your name>" GIT_EMAIL="<your email>" docker compose -f docker-compose.mmlac.yaml up --build -d
 #
 # Exec into the container with: docker compose -f docker-compose.mmlac.yaml exec gascity zsh
 
