@@ -18,6 +18,10 @@ Run docker compose to build and spawn the container:
 GIT_USER="Your Name" GIT_EMAIL="your-email@example.com" docker compose -f docker-compose.mmlac.yaml up --build -d
 ```
 
+Then exec into your container as many times as you want for multiple shells:
+```
+docker compose -f docker-compose.mmlac.yaml exec gascity zsh
+```
 
 ## Packs
 
