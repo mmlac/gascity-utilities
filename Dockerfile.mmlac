@@ -1,0 +1,118 @@
+# Run with
+# docker build -t gascity:latest -f Dockerfile.mmlac .
+#
+# Sandbox image for running Gas City (`gc`) inside a container, modeled on
+# gastown's Dockerfile.mmlac but adapted for the gascity binary, build process,
+# and runtime dependencies (per docs/getting-started/installation.md).
+FROM docker/sandbox-templates:claude-code
+
+ARG GO_VERSION=1.25.6
+# Pinned dependency versions — keep in sync with deps.env.
+ARG DOLT_VERSION=1.86.6
+ARG BD_VERSION=v1.0.3
+ARG NPM_VERSION=10.9.2
+ARG NODE_VERSION=22.14.0
+
+USER root
+
+RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates \
+   && curl -fsSL https://packages.cloud.google.com/apt/doc/apt-key.gpg -o /usr/share/keyrings/cloud.google.asc \
+   && echo 'deb [signed-by=/usr/share/keyrings/cloud.google.asc] https://packages.cloud.google.com/apt cloud-sdk main' > /etc/apt/sources.list.d/google-cloud-sdk.list
+
+# System dependencies. Runtime tools required by Gas City: tmux, jq, git,
+# util-linux (provides flock). Build tools: build-essential, curl, make.
+# Helpful debugging extras (mirroring gastown): ripgrep, zsh, tini, gh,
+# netcat-openbsd, vim, sqlite3.
+RUN apt-get update -y && apt-get install -y \
+    build-essential \
+    git \
+    jq \
+    sqlite3 \
+    dotnet-sdk-10.0 \
+    tmux \
+    curl \
+    ripgrep \
+    zsh \
+    tini \
+    gnupg \
+    gh \
+    netcat-openbsd \
+    vim \
+    util-linux \
+    ca-certificates \
+    libglib2.0-0t64 libatk1.0-0t64 libatk-bridge2.0-0t64 libdbus-1-3 \
+     libcups2t64 libxcb1 libxkbcommon0 libasound2t64 libgbm1 libx11-6 \
+     libxext6 libcairo2 libpango-1.0-0 libxcomposite1 libxdamage1 \
+     libxfixes3 libxrandr2 libatspi2.0-0t6 \
+     google-cloud-cli \
+    && rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/*
+
+# Install Node.js from official tarball (apt nodejs is too old).
+RUN ARCH=$(dpkg --print-architecture) && \
+    case "$ARCH" in \
+        amd64) NODE_ARCH="x64" ;; \
+        arm64) NODE_ARCH="arm64" ;; \
+        *) echo "Unsupported arch: $ARCH" && exit 1 ;; \
+    esac && \
+    curl -fsSL "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-${NODE_ARCH}.tar.xz" \
+        | tar -C /usr/local -xJ --strip-components=1
+
+# Upgrade npm; the version bundled with Node.js may be older than desired.
+RUN npm install -g npm@${NPM_VERSION}
+
+# Install Go from official tarball (apt golang-go is too old).
+RUN ARCH=$(dpkg --print-architecture) && \
+    curl -fsSL "https://go.dev/dl/go${GO_VERSION}.linux-${ARCH}.tar.gz" | tar -C /usr/local -xz
+ENV PATH="/app/gascity/bin:/usr/local/go/bin:/home/agent/go/bin:${PATH}"
+
+# Install dolt and bd (beads CLI) using the repo's pinned, checksum-verified
+# installers. These match the versions in deps.env and the rest of CI.
+COPY .github/scripts/install-dolt-archive.sh /tmp/install-dolt-archive.sh
+RUN /tmp/install-dolt-archive.sh "${DOLT_VERSION}" \
+    && rm -f /tmp/install-dolt-archive.sh
+
+COPY .github/scripts/install-bd-archive.sh /tmp/install-bd-archive.sh
+RUN /tmp/install-bd-archive.sh "${BD_VERSION}" \
+    && rm -f /tmp/install-bd-archive.sh
+
+# Set up directories.
+RUN mkdir -p /app /gt && chown agent:agent /app /gt
+
+# Environment setup for bash and zsh.
+RUN echo 'export PATH="/app/gascity/bin:$PATH"' >> /etc/profile.d/gascity.sh && \
+    echo 'export PATH="/app/gascity/bin:$PATH"' >> /etc/zsh/zshenv
+RUN echo 'export COLORTERM="truecolor"' >> /etc/profile.d/colorterm.sh && \
+    echo 'export COLORTERM="truecolor"' >> /etc/zsh/zshenv
+RUN echo 'export TERM="xterm-256color"' >> /etc/profile.d/term.sh && \
+    echo 'export TERM="xterm-256color"' >> /etc/zsh/zshenv
+
+RUN npm i -g typescript-language-server typescript
+RUN npm i -g @openai/codex
+
+# Install Claude Code via the official installer.
+# The installer puts the versioned binary under ~/.local/share/claude/versions/
+# and creates a symlink at ~/.local/bin/claude -> .../versions/<ver>.
+# We relocate the share dir to /usr/local/share/claude, fix ownership, then
+# create a fresh symlink at /usr/local/bin/claude pointing into the new location.
+RUN curl -fsSL https://claude.ai/install.sh | bash \
+    && CLAUDE_VER=$(ls /root/.local/share/claude/versions/ | sort -V | tail -1) \
+    && mv /root/.local/share/claude /usr/local/share/claude \
+    && chown -R agent:agent /usr/local/share/claude \
+    && ln -sf /usr/local/share/claude/versions/${CLAUDE_VER} /usr/local/bin/claude
+
+RUN go install golang.org/x/tools/gopls@latest
+RUN dotnet tool install -g csharp-ls
+
+USER agent
+
+COPY --chown=agent:agent . /app/gascity
+
+# `make build` produces ./bin/gc — see Makefile build target.
+RUN cd /app/gascity && make build
+
+COPY --chown=agent:agent --chmod=0755 docker-entrypoint.sh /app/docker-entrypoint.sh
+
+WORKDIR /gc
+
+ENTRYPOINT ["tini", "--", "/app/docker-entrypoint.sh"]
+CMD ["sleep", "infinity"]
